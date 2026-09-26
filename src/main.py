@@ -172,9 +172,23 @@ if __name__ == "__main__":
         choices=[2, 3, 4],
         help="2=CP2 guardrails · 3=CP3 suite · 4=CP4 red-team",
     )
+    parser.add_argument(
+        "--chat",
+        action="store_true",
+        help="Chạy interactive console để chat thử với Agent",
+    )
     args = parser.parse_args()
 
-    if args.part:
+    if args.chat:
+        from pathlib import Path
+        import importlib.util
+        chat_script = Path(__file__).resolve().parents[1] / "chat.py"
+        spec = importlib.util.spec_from_file_location("chat", chat_script)
+        chat_mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(chat_mod)
+        asyncio.run(chat_mod.interactive_session())
+    elif args.part:
         asyncio.run(main(parts=[args.part]))
     else:
         asyncio.run(main())
+
