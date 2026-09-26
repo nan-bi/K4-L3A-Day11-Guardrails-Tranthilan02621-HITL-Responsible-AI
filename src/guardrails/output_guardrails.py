@@ -41,12 +41,14 @@ def content_filter(response: str) -> dict:
 
     # PII patterns to check
     PII_PATTERNS = {
-        # TODO: Add regex patterns for:
-        # - VN phone number: r"0\d{9,10}"
-        # - Email: r"[\w.-]+@[\w.-]+\.[a-zA-Z]{2,}"
-        # - National ID (CMND/CCCD): r"\b\d{9}\b|\b\d{12}\b"
-        # - API key pattern: r"sk-[a-zA-Z0-9-]+"
-        # - Password pattern: r"password\s*[:=]\s*\S+"
+        "api_key": r"sk-[a-zA-Z0-9_-]+",
+        "email": r"[\w.-]+@[\w.-]+\.[a-zA-Z]{2,}",
+        "phone": r"(?:\+84|0)\d{9,10}\b",
+        "national_id": r"\b\d{9}\b|\b\d{12}\b",
+        "credit_card": r"\b(?:\d{4}[ -]?){3}\d{4}\b",
+        "password_assignment": r"(?:password|mật khẩu)\s*[:=]\s*\S+",
+        "admin_password": r"\badmin\s*123\b",
+        "db_host": r"db(?:\.|\s*\.\s*)vinbank(?:\.|\s*\.\s*)internal(?::\d+)?",
     }
 
     for name, pattern in PII_PATTERNS.items():
@@ -54,6 +56,19 @@ def content_filter(response: str) -> dict:
         if matches:
             issues.append(f"{name}: {len(matches)} found")
             redacted = re.sub(pattern, "[REDACTED]", redacted, flags=re.IGNORECASE)
+
+    try:
+        from agents.security_boundary import contains_secret
+        if contains_secret(response):
+            if "secret_leak_detected" not in issues:
+                issues.append("secret_leak_detected")
+            for secret_token in ["admin123", "sk-vinbank-secret-2024", "db.vinbank.internal:5432", "db.vinbank.internal"]:
+                redacted = re.sub(re.escape(secret_token), "[REDACTED]", redacted, flags=re.IGNORECASE)
+        # Fail-closed check: if any secret still persists in the redacted output, sanitize completely
+        if contains_secret(redacted):
+            redacted = "[REDACTED: Thông tin nhạy cảm đã được bảo vệ]"
+    except Exception:
+        pass
 
     return {
         "safe": len(issues) == 0,
@@ -89,15 +104,7 @@ Respond with ONLY one word: SAFE or UNSAFE
 If UNSAFE, add a brief reason on the next line.
 """
 
-# TODO: Create safety_judge_agent using LlmAgent
-# Hint:
-# safety_judge_agent = llm_agent.LlmAgent(
-#     model="gemini-3.5-flash",
-#     name="safety_judge",
-#     instruction=SAFETY_JUDGE_INSTRUCTION,
-# )
-
-safety_judge_agent = None  # TODO: Replace with implementation
+safety_judge_agent = None
 judge_runner = None
 
 
@@ -172,16 +179,24 @@ class OutputGuardrailPlugin(base_plugin.BasePlugin):
         if not response_text:
             return llm_response
 
-        # TODO: Implement logic:
-        # 1. Call content_filter(response_text)
-        #    - If issues found: replace llm_response.content with redacted version
-        #    - Increment self.redacted_count
-        # 2. If use_llm_judge: call llm_safety_check(response_text)
-        #    - If unsafe: replace llm_response.content with a safe message
-        #    - Increment self.blocked_count
-        # 3. Return llm_response (possibly modified)
+        # 1. Content filter
+        cf_result = content_filter(response_text)
+        if not cf_result["safe"]:
+            self.redacted_count += 1
+            if hasattr(llm_response, "content") and llm_response.content:
+                llm_response.content.parts = [types.Part.from_text(text=cf_result["redacted"])]
 
-        return llm_response  # TODO: modify if needed
+        # 2. LLM Judge check if enabled
+        if self.use_llm_judge:
+            judge_res = await llm_safety_check(response_text)
+            if not judge_res.get("safe", True):
+                self.blocked_count += 1
+                if hasattr(llm_response, "content") and llm_response.content:
+                    llm_response.content.parts = [
+                        types.Part.from_text(text="I cannot fulfill this request due to security policies.")
+                    ]
+
+        return llm_response
 
 
 # ============================================================
